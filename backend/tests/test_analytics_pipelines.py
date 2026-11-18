@@ -152,3 +152,178 @@ def test_metric_alias_version():
     })
     assert entry is not None, ms
 
+
+
+# ---------------------------------------------------------------------------
+# V025 样本分群成员明细：稳定、可核对、空群/超限有明确结果
+# ---------------------------------------------------------------------------
+
+def _reset_sample_groups(rows):
+    store.rows("sample_group").clear()
+    store.rows("sample_group").extend(rows)
+    for table in ("sample_group_members", "sample_group_member_snapshots", "sample_group_member_audit"):
+        store.aux_rows(table).clear()
+    store.bump_version("sample_group")
+
+
+def test_sample_group_members_are_stable_across_repeated_reads():
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-STABLE", "分群名称": "稳定",
+        "筛选条件": "platform='ios' AND age>=18", "样本基数": "400",
+        "group_type": "experiment", "experiment_id": 1,
+    }])
+    sg = SampleGroupService()
+    first = sg.get_member_snapshot(1)
+    second = sg.get_member_snapshot(1)
+    assert first["state"] == "ready"
+    assert first["matched_count"] > 0
+    assert first["member_count"] == first["matched_count"]
+    assert [m["member_key"] for m in first["members"]] == [m["member_key"] for m in second["members"]]
+    assert [m["metric_value"] for m in first["members"]] == [m["metric_value"] for m in second["members"]]
+
+
+def test_sample_group_reads_its_own_filter_condition():
+    _reset_sample_groups([
+        {"id": 1, "status": "已就绪", "分群编号": "SG-IOS", "分群名称": "iOS",
+         "筛选条件": "platform='ios'", "样本基数": "600"},
+        {"id": 2, "status": "已就绪", "分群编号": "SG-WEB", "分群名称": "Web",
+         "筛选条件": "platform='web'", "样本基数": "600"},
+    ])
+    sg = SampleGroupService()
+    ios = sg.get_member_snapshot(1)
+    web = sg.get_member_snapshot(2)
+    assert ios["matched_count"] != web["matched_count"] or ios["members"][0]["member_key"] != web["members"][0]["member_key"]
+    assert ios["filter_conditions"][0]["field"] == "platform"
+    assert ios["matched_count"] < 600
+
+
+def test_empty_group_reports_zero_members_and_keeps_base():
+    _reset_sample_groups([{
+        "id": 1, "status": "草稿", "分群编号": "SG-EMPTY", "分群名称": "空群",
+        "筛选条件": "country='ZZ'", "样本基数": "1200",
+    }])
+    sg = SampleGroupService()
+    snapshot = sg.get_member_snapshot(1)
+    assert snapshot["state"] == "empty"
+    assert snapshot["matched_count"] == 0
+    assert snapshot["members"] == []
+    assert snapshot["sample_base"] == 1200
+    assert snapshot["ready"] is False
+    entry, message = sg.run_action(1, "确认就绪")
+    assert entry is None and "空群" in message
+
+
+def test_truncated_group_keeps_full_base_and_reports_unexpanded():
+    _reset_sample_groups([{
+        "id": 1, "status": "计算中", "分群编号": "SG-BIG", "分群名称": "超限",
+        "筛选条件": "", "样本基数": "1200",
+    }])
+    sg = SampleGroupService()
+    snapshot = sg.get_member_snapshot(1)
+    assert snapshot["state"] == "truncated"
+    assert snapshot["sample_base"] == 1200
+    assert snapshot["matched_count"] == 1200
+    assert snapshot["member_count"] == snapshot["member_limit"] == 500
+    assert snapshot["unexpanded_count"] == 700
+    assert snapshot["ready"] is True
+    entry, _ = sg.run_action(1, "确认就绪")
+    assert entry is not None and entry["status"] == "已就绪"
+
+
+def test_missing_base_and_invalid_filter_are_explained():
+    _reset_sample_groups([
+        {"id": 1, "status": "草稿", "分群编号": "SG-NOBASE", "分群名称": "无基数",
+         "筛选条件": "", "样本基数": "未知"},
+        {"id": 2, "status": "草稿", "分群编号": "SG-BAD", "分群名称": "坏条件",
+         "筛选条件": "unknown_field=1", "样本基数": "100"},
+    ])
+    sg = SampleGroupService()
+    assert sg.get_member_snapshot(1)["state"] == "no_data"
+    assert sg.get_member_snapshot(2)["state"] == "invalid"
+    assert "无法解析" in sg.get_member_snapshot(2)["reason"]
+
+
+def test_failed_computation_keeps_last_complete_members():
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-FAIL", "分群名称": "失败",
+        "筛选条件": "", "样本基数": "200",
+    }])
+    sg = SampleGroupService()
+    good = sg.get_member_snapshot(1)
+    keys = [m["member_key"] for m in good["members"]]
+    original = sg._compute
+
+    def boom(_group, _fingerprint):
+        raise RuntimeError("模拟计算异常")
+
+    sg._compute = boom
+    failed = sg.get_member_snapshot(1, force=True)
+    assert failed["state"] == "failed"
+    assert failed["ready"] is False
+    assert [m["member_key"] for m in failed["members"]] == keys
+
+    sg._compute = original
+    recovered = sg.get_member_snapshot(1, force=True)
+    assert recovered["state"] == "ready"
+    assert [m["member_key"] for m in recovered["members"]] == keys
+
+
+def test_residue_rows_trigger_rollback_before_serving():
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-RESIDUE", "分群名称": "残行",
+        "筛选条件": "", "样本基数": "100",
+    }])
+    sg = SampleGroupService()
+    snapshot = sg.get_member_snapshot(1)
+    store.aux_rows("sample_group_members").append({
+        "snapshot_id": "bogus", "group_id": 1, "ordinal": 999, "member_key": "1:STALE",
+        "user_id": "STALE", "group_type": "control", "metric_value": 0.5,
+    })
+    repaired = sg.get_member_snapshot(1)
+    assert [m["member_key"] for m in repaired["members"]] == [m["member_key"] for m in snapshot["members"]]
+    audit = sg.get_member_audit(1)
+    assert audit["residue"]["ok"] is True
+    assert any(row["reason_code"] == "residue_rollback" for row in audit["audit"])
+
+
+def test_empty_member_table_rolls_back_and_recomputes():
+    """V025：核对明细表为空但快照仍在时，整体回滚后重算，不返回空数据残留。"""
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-V025", "分群名称": "留档",
+        "筛选条件": "", "样本基数": "150",
+    }])
+    sg = SampleGroupService()
+    first = sg.get_member_snapshot(1)
+    store.aux_rows("sample_group_members").clear()
+    repaired = sg.get_member_snapshot(1)
+    assert repaired["state"] == "ready"
+    assert repaired["member_count"] == first["member_count"]
+    assert [m["member_key"] for m in repaired["members"]] == [m["member_key"] for m in first["members"]]
+
+
+def test_list_and_detail_share_the_same_confirmed_result():
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-SHARE", "分群名称": "一致",
+        "筛选条件": "", "样本基数": "300",
+    }])
+    sg = SampleGroupService()
+    items, _ = sg.list_entries()
+    summary = items[0]["member_summary"]
+    detail = sg.get_member_snapshot(1)
+    assert summary["state"] == detail["state"]
+    assert summary["member_count"] == detail["member_count"]
+    assert summary["sample_base"] == detail["sample_base"]
+    assert summary["snapshot_id"] == detail["snapshot_id"]
+
+
+def test_metric_def_consumer_reads_member_values_against_base():
+    """V025 跨模块联动：指标定义按分群基数校验有效成员数量。"""
+    _reset_sample_groups([{
+        "id": 1, "status": "已就绪", "分群编号": "SG-CONSUME", "分群名称": "消费",
+        "筛选条件": "", "样本基数": "800",
+    }])
+    sg = SampleGroupService()
+    snapshot = sg.get_member_snapshot(1)
+    assert snapshot["sample_base"] >= snapshot["matched_count"]
+    assert all(0.0 <= member["metric_value"] <= 1.0 for member in snapshot["members"])
+    assert snapshot["member_count"] + snapshot["unexpanded_count"] == snapshot["matched_count"]

@@ -49,7 +49,8 @@ def export_entries(
 ) -> StreamingResponse:
     """下载当前筛选条件下的 UTF-8 CSV；必须声明在 /{entry_id} 之前。"""
     items, _ = service.list_entries(
-        filters=query_filters(request), keyword=keyword, status=status, page=1, size=1000000)
+        filters=query_filters(request), keyword=keyword, status=status,
+        page=1, size=1000000, with_members=False)
     output = io.StringIO()
     output.write("\ufeff")
     writer = csv.writer(output, lineterminator="\n")
@@ -71,7 +72,38 @@ def get_entry(entry_id: int) -> dict:
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"样本分群 {entry_id} 不存在或已归档")
-    return entry
+    result = dict(entry)
+    # 详情页与列表页读取同一份确认结果，避免两边对不上。
+    result["member_summary"] = service.get_member_summary(entry_id)
+    return result
+
+
+@router.get("/{entry_id}/members", response_model=dict)
+def get_group_members(entry_id: int) -> dict:
+    """读取分群成员确认结果：成员键、指标值、成员上限与样本基数同时返回。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"样本分群 {entry_id} 不存在或已归档")
+    snapshot = service.get_member_snapshot(entry_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"样本分群 {entry_id} 不存在或已归档")
+    return snapshot
+
+
+@router.post("/{entry_id}/members", response_model=dict)
+def recompute_group_members(entry_id: int) -> dict:
+    """重新计算成员明细；失败时保留最近一次完整成员集合并说明原因。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"样本分群 {entry_id} 不存在或已归档")
+    return service.get_member_snapshot(entry_id, force=True)
+
+
+@router.get("/{entry_id}/members/audit", response_model=dict)
+def get_group_member_audit(entry_id: int) -> dict:
+    """V025 留档核对：确认结果、留档记录与残行检查一次返回。"""
+    audit = service.get_member_audit(entry_id)
+    if audit is None:
+        raise HTTPException(status_code=404, detail=f"样本分群 {entry_id} 不存在或已归档")
+    return audit
 
 
 @router.post("", response_model=ActionResult)

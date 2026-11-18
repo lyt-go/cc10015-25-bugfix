@@ -17,9 +17,32 @@ class Store:
         }
         self._versions: dict[str, int] = {name: 1 for name in self._tables}
         self._created_at: dict[str, float] = {name: time.time() for name in self._tables}
+        # 辅助表（分群成员明细、快照留档）不参与模块清单与概览统计，
+        # 避免内部核对表被当成业务模块展示。
+        self._aux_tables: dict[str, list[dict[str, Any]]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
+
+    def aux_rows(self, name: str) -> list[dict[str, Any]]:
+        """读取内部辅助表（成员明细、快照留档），与业务模块表隔离。"""
+        return self._aux_tables.setdefault(name, [])
+
+    def replace_aux_rows(
+        self, name: str, predicate: Any, rows: list[dict[str, Any]]
+    ) -> None:
+        """整组替换辅助表数据：先清掉同一分群的旧行，再写入新行。
+
+        调用方先在局部变量里把新数据算完整，成功后才调用这里，
+        因此计算中途抛错时旧数据保持原样，不会留下半截明细。
+        """
+        table = self.aux_rows(name)
+        table[:] = [row for row in table if not predicate(row)]
+        table.extend(rows)
+
+    def clear_aux_rows(self, name: str, predicate: Any) -> None:
+        table = self.aux_rows(name)
+        table[:] = [row for row in table if not predicate(row)]
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])

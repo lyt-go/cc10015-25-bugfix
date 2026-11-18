@@ -31,13 +31,32 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>成员确认</th>
+          <th>样本基数</th>
+          <th>命中成员</th>
+          <th>明细条数</th>
+          <th>未展开</th>
+          <th>确认说明</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td :data-testid="`member-state-${row.id}`" :data-state="String(row.member_summary?.state ?? '')">
+            {{ row.member_summary?.state_label ?? '—' }}
+          </td>
+          <td>{{ formatNumber(row.member_summary?.sample_base) }}</td>
+          <td>{{ formatNumber(row.member_summary?.matched_count) }}</td>
+          <td>{{ formatNumber(row.member_summary?.member_count) }}</td>
+          <td>{{ formatNumber(row.member_summary?.unexpanded_count) }}</td>
+          <td class="summary-note" :data-testid="`member-reason-${row.id}`">
+            {{ row.member_summary?.reason ?? '—' }}
+          </td>
           <td class="row-actions">
+            <RouterLink class="link" :to="`/sample_group/${row.id}`" :data-testid="`detail-${row.id}`">
+              成员明细
+            </RouterLink>
             <button
               v-for="action in actions"
               :key="action"
@@ -51,7 +70,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无样本分群数据，可先登记样本分群</td>
+          <td :colspan="columns.length + 7" class="empty-state">暂无样本分群数据，可先登记样本分群</td>
         </tr>
       </tbody>
     </table>
@@ -84,7 +103,18 @@ import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | null> & {
+  member_summary?: {
+    state: string
+    state_label?: string
+    reason?: string
+    retryable?: boolean
+    sample_base?: number | null
+    matched_count?: number
+    member_count?: number
+    unexpanded_count?: number
+  }
+}
 
 const ENDPOINT = '/api/sample_group'
 const columns = ["分群编号", "分群名称", "筛选条件", "样本基数", "分群日期", "更新方式", "有效天数", "负责人"]
@@ -105,6 +135,10 @@ const stats = computed(() => [
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
   { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[statuses.length - 1]).length },
 ])
+
+function formatNumber(value: number | null | undefined) {
+  return value === null || value === undefined ? '—' : String(value)
+}
 
 function resetFilters() {
   filters.value = {}

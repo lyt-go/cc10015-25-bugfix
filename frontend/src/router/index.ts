@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Overview from '@/views/Overview.vue'
 const Experiment = () => import('@/views/experiment/index.vue')
 const SampleGroup = () => import('@/views/sample_group/index.vue')
+const SampleGroupDetail = () => import('@/views/sample_group/detail.vue')
 const MetricDef = () => import('@/views/metric_def/index.vue')
 const AbResult = () => import('@/views/ab_result/index.vue')
 const SegmentCompare = () => import('@/views/segment_compare/index.vue')
@@ -26,6 +27,7 @@ const router = createRouter({
     { path: '/', name: 'overview', component: Overview },
     { path: '/experiment', name: 'experiment', component: Experiment },
     { path: '/sample_group', name: 'sample_group', component: SampleGroup },
+    { path: '/sample_group/:id', name: 'sample_group_detail', component: SampleGroupDetail },
     { path: '/metric_def', name: 'metric_def', component: MetricDef },
     { path: '/ab_result', name: 'ab_result', component: AbResult },
     { path: '/segment_compare', name: 'segment_compare', component: SegmentCompare },
